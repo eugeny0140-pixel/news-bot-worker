@@ -9,7 +9,7 @@ from telegram import Bot
 from datetime import datetime
 from dateutil import parser as date_parser
 
-# --- Настройки из переменных окружения ---
+# --- Настройки ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -19,7 +19,7 @@ CHANNELS = ["@finanosint", "@time_n_John"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# --- Фильтры по категориям (ваш список) ---
+# --- Фильтры ---
 FILTERS = {
     "SVO": [
         r"\bsvo\b", r"\bспецоперация\b", r"\bspecial military operation\b",
@@ -73,26 +73,19 @@ FILTERS = {
     ]
 }
 
-# Компилируем регулярки для производительности
 COMPILED_FILTERS = {
     cat: [re.compile(p, re.IGNORECASE) for p in patterns]
     for cat, patterns in FILTERS.items()
 }
 
-# --- Источники с RSS-лентами (19 источников, где доступны RSS) ---
+# --- Источники ---
 SOURCES = [
-    {"name": "Good Judgment", "rss": "https://goodjudgment.com/feed"},  # Проверить!
-    {"name": "Johns Hopkins", "rss": "https://centerforhealthsecurity.org/feed/"},
-    {"name": "Metaculus", "rss": "https://www.metaculus.com/feed/"},
-    {"name": "DNI Global Trends", "rss": "https://www.dni.gov/index.php/rss/145-gt2040-home"},  # Проверить!
+    {"name": "The Economist", "rss": "https://www.economist.com/rss/latest/rss.xml"},
+    {"name": "Bloomberg", "rss": "https://feeds.bloomberg.com/markets/news.rss"},
     {"name": "RAND Corporation", "rss": "https://www.rand.org/rss.xml"},
-    {"name": "World Economic Forum", "rss": "https://www.weforum.org/feed/"},
     {"name": "CSIS", "rss": "https://www.csis.org/rss.xml"},
     {"name": "Atlantic Council", "rss": "https://www.atlanticcouncil.org/feed/"},
     {"name": "Chatham House", "rss": "https://www.chathamhouse.org/feed"},
-    {"name": "The Economist", "rss": "https://www.economist.com/rss/latest/rss.xml"},
-    {"name": "Bloomberg", "rss": "https://feeds.bloomberg.com/markets/news.rss"},
-    {"name": "Reuters Institute", "rss": "https://reutersinstitute.politics.ox.ac.uk/feed"},
     {"name": "Foreign Affairs", "rss": "https://www.foreignaffairs.com/rss.xml"},
     {"name": "CFR", "rss": "https://www.cfr.org/rss.xml"},
     {"name": "BBC Future", "rss": "https://www.bbc.com/future/rss"},
@@ -100,7 +93,100 @@ SOURCES = [
     {"name": "Carnegie Endowment", "rss": "https://carnegieendowment.org/feed"},
     {"name": "Bruegel", "rss": "https://bruegel.org/feed/"},
     {"name": "E3G", "rss": "https://e3g.org/feed/"},
+    {"name": "Good Judgment", "custom_parser": lambda: scrape_good_judgment()},
+    {"name": "Metaculus", "custom_parser": lambda: scrape_metaculus()},
+    {"name": "DNI Global Trends", "custom_parser": lambda: scrape_odni()},
 ]
+
+# --- Парсеры ---
+def scrape_good_judgment():
+    url = "https://goodjudgment.com/blog"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        posts = soup.find_all('article', class_='post') or soup.find_all('div', class_='blog-post')
+        for post in posts:
+            title_tag = post.find('h2') or post.find('h3')
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            link_tag = title_tag.find('a')
+            if not link_tag:
+                continue
+            link = link_tag.get('href')
+            if not link.startswith('http'):
+                link = "https://goodjudgment.com" + link
+            summary_tag = post.find('p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
+            pub_date = datetime.now().isoformat()
+
+            if article_exists(link):
+                continue
+            category = classify_article(title, summary)
+            if category:
+                save_article(title, link, summary, pub_date, "Good Judgment", category)
+                send_to_telegram(title, link, "Good Judgment", category)
+    except Exception as e:
+        print(f"❌ Ошибка парсинга Good Judgment: {e}")
+
+def scrape_metaculus():
+    url = "https://www.metaculus.com/questions/"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        items = soup.find_all('div', class_='question-card') or soup.find_all('div', class_='question-list-item')
+        for item in items:
+            title_tag = item.find('a', class_='title-link') or item.find('h3').find('a')
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            link = "https://www.metaculus.com" + title_tag.get('href')
+            summary_tag = item.find('div', class_='blurb') or item.find('p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
+            pub_date = datetime.now().isoformat()
+
+            if article_exists(link):
+                continue
+            category = classify_article(title, summary)
+            if category:
+                save_article(title, link, summary, pub_date, "Metaculus", category)
+                send_to_telegram(title, link, "Metaculus", category)
+    except Exception as e:
+        print(f"❌ Ошибка парсинга Metaculus: {e}")
+
+def scrape_odni():
+    url = "https://www.dni.gov/index.php/gt2040-home"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        articles = soup.find_all('div', class_='article') or soup.find_all('div', class_='press-release')
+        for article in articles:
+            title_tag = article.find('h3') or article.find('h2')
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            link_tag = title_tag.find('a')
+            if link_tag:
+                link = link_tag.get('href')
+                if not link.startswith('http'):
+                    link = "https://www.dni.gov" + link
+            else:
+                link = url
+            summary_tag = article.find('p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
+            pub_date = datetime.now().isoformat()
+
+            if article_exists(link):
+                continue
+            category = classify_article(title, summary)
+            if category:
+                save_article(title, link, summary, pub_date, "DNI Global Trends", category)
+                send_to_telegram(title, link, "DNI Global Trends", category)
+    except Exception as e:
+        print(f"❌ Ошибка парсинга DNI: {e}")
 
 # --- Функции ---
 def contains_keywords(text, category):
@@ -122,7 +208,7 @@ def is_recent(entry, max_hours=2):
         diff_hours = (now - pub).total_seconds() / 3600
         return diff_hours < max_hours
     except:
-        return True  # если дата не распарсилась — считаем актуальной
+        return True
 
 def article_exists(url):
     response = supabase.table("news_articles").select("id").eq("url", url).execute()
@@ -150,6 +236,7 @@ def send_to_telegram(title, url, source, category):
         except Exception as e:
             print(f"❌ Ошибка отправки в {channel}: {e}")
 
+# --- Основной цикл ---
 def fetch_from_rss(source):
     try:
         feed = feedparser.parse(source["rss"])
@@ -179,12 +266,17 @@ def fetch_from_rss(source):
     except Exception as e:
         print(f"❌ Ошибка обработки {source['name']}: {e}")
 
-# --- Основной цикл ---
+def fetch_and_process():
+    for source in SOURCES:
+        if "custom_parser" in source:
+            source["custom_parser"]()
+        else:
+            fetch_from_rss(source)
+
 if __name__ == "__main__":
     print("🚀 Background Worker запущен. Ожидание 14 минут между проверками...")
     while True:
         print(f"\n🕒 Проверка источников: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        for source in SOURCES:
-            fetch_from_rss(source)
+        fetch_and_process()
         print(f"⏳ Следующая проверка через 14 минут...")
-        time.sleep(14 * 60)  # 14 минут
+        time.sleep(14 * 60)
