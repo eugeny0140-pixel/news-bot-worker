@@ -8,52 +8,26 @@ import requests
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 import schedule
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from supabase import create_client, Client
 
 # ================== НАСТРОЙКИ ==================
-# 🔑 Токен берется из переменной окружения (для Render.com)
+# 🔑 Токен берется из переменной окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ Ошибка: переменная окружения TELEGRAM_TOKEN не установлена")
 
-CHANNEL_ID = os.getenv('CHANNEL_ID', "@time_n_John")  # Можно также задать через переменную окружения
-
-# 🔌 Настройки прокси для обхода блокировок
-USE_PROXY = os.getenv('USE_PROXY', 'false').lower() == 'true'
-PROXY_HOST = os.getenv('PROXY_HOST', '')
-PROXY_PORT = os.getenv('PROXY_PORT', '')
-PROXY_TYPE = os.getenv('PROXY_TYPE', 'socks5')  # socks5, http
-PROXY_USER = os.getenv('PROXY_USER', '')
-PROXY_PASS = os.getenv('PROXY_PASS', '')
-
-# Создаем настройки прокси
-PROXY = {}
-if USE_PROXY and PROXY_HOST and PROXY_PORT:
-    proxy_url = f"{PROXY_TYPE}://"
-    if PROXY_USER and PROXY_PASS:
-        proxy_url += f"{PROXY_USER}:{PROXY_PASS}@"
-    proxy_url += f"{PROXY_HOST}:{PROXY_PORT}"
-    PROXY = {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+CHANNEL_ID = os.getenv('CHANNEL_ID', "@time_n_John")
 
 # 🗄️ Настройки Supabase
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-SUPABASE_TABLE = os.getenv('SUPABASE_TABLE', 'seen_links')
-supabase: Client = None
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ Ошибка: SUPABASE_URL и SUPABASE_KEY обязательны для работы")
 
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        log.info("✅ Подключение к Supabase успешно установлено")
-    except Exception as e:
-        log.error(f"❌ Ошибка подключения к Supabase: {e}")
-else:
-    log.info("ℹ️ Supabase не настроен, используется локальное хранение ссылок")
+# Создаем подключение к Supabase
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+log = logging.getLogger(__name__)
+log.info("✅ Подключение к Supabase успешно установлено")
 
 # ================== ИСТОЧНИКИ (КАНАЛЫ) ==================
 SOURCES = [
@@ -131,9 +105,8 @@ KEYWORDS = [
     r"\bhour ago\b", r"\bчас назад\b", r"\bقبل ساعات\b", r"\b刚刚报告\b"
 ]
 
-MAX_SEEN = 5000
-MAX_PER_RUN = 10  # Увеличиваем лимит для большего охвата
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 15))  # Интервал проверки в минутах
+MAX_PER_RUN = 10
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 15))
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -144,9 +117,8 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-log = logging.getLogger(__name__)
 
-# ================== ЗАГОЛОВКИ И СЕССИЯ ==================
+# ================== ЗАГОЛОВКИ ==================
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
     'Accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
@@ -156,87 +128,60 @@ HEADERS = {
     'Upgrade-Insecure-Requests': '1',
 }
 
-def create_session():
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=4,  # Увеличиваем количество попыток
-        backoff_factor=2,  # Увеличиваем задержку между попытками
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update(HEADERS)
-    
-    # Подключаем прокси, если включено
-    if USE_PROXY and PROXY:
-        session.proxies.update(PROXY)
-        log.info(f"✅ Используется прокси: {PROXY_TYPE}://{PROXY_HOST}:{PROXY_PORT}")
-        
-    return session
-
 # ================== УТИЛИТЫ ==================
-def load_seen_links() -> set:
-    seen_links = set()
-    
-    # Сначала пытаемся загрузить из Supabase
-    if supabase:
-        try:
-            response = supabase.table(SUPABASE_TABLE).select("link").order("created_at", desc=True).limit(MAX_SEEN).execute()
-            if response.data:
-                for row in response.data:
-                    seen_links.add(row['link'])
-                log.info(f"📥 Загружено {len(seen_links)} ссылок из Supabase")
-                return seen_links
-        except Exception as e:
-            log.error(f"❌ Ошибка при загрузке ссылок из Supabase: {e}")
-    
-    # Если Supabase недоступен, используем локальный файл
-    SEEN_FILE = "seen_links.json"
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                seen_links = set(data[-MAX_SEEN:])
-                log.info(f"📥 Загружено {len(seen_links)} ссылок из файла")
-        except Exception as e:
-            log.error(f"❌ Ошибка чтения {SEEN_FILE}: {e}")
-    
-    return seen_links
-
-def save_seen_link(link: str):
-    # Сначала пытаемся сохранить в Supabase
-    if supabase:
-        try:
-            # Проверяем, существует ли уже такая ссылка
-            existing = supabase.table(SUPABASE_TABLE).select("link").eq("link", link).execute()
-            if not existing.data:
-                # Добавляем новую ссылку
-                supabase.table(SUPABASE_TABLE).insert({"link": link}).execute()
-                log.info(f"💾 Сохранена ссылка в Supabase: {link}")
-                return True
-            else:
-                log.debug(f"ℹ️ Ссылка уже существует в Supabase: {link}")
-                return False
-        except Exception as e:
-            log.error(f"❌ Ошибка при сохранении ссылки в Supabase: {e}")
-    
-    # Если Supabase недоступен, используем локальный файл
-    SEEN_FILE = "seen_links.json"
-    seen = load_seen_links()
-    seen.add(link)
-    
+def is_article_published(url: str) -> bool:
+    """Проверяет, была ли статья уже опубликована"""
     try:
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(seen)[-MAX_SEEN:], f)
-        log.info(f"💾 Сохранена ссылка в файл: {link}")
-        return True
+        response = supabase.table('published_articles').select('id').eq('url', url).execute()
+        return bool(response.data)
     except Exception as e:
-        log.error(f"❌ Ошибка сохранения {SEEN_FILE}: {e}")
+        log.error(f"Ошибка при проверке публикации: {e}")
         return False
 
-def send_to_telegram(text: str):
+def get_article_category(title: str) -> str:
+    """Определяет категорию статьи"""
+    low = title.lower()
+    if re.search(r"svo|спецоперация|война|war|conflict|конфликт|наступление|offensive", low):
+        return "SVO"
+    if re.search(r"bitcoin|btc|ethereum|eth|криптовалюта|crypto|цифровой рубль", low):
+        return "Crypto"
+    if re.search(r"pandemic|пандемия|вирус|virus|вакцина|vaccine|бустер|booster", low):
+        return "Pandemic"
+    return "Other"
+
+def save_published_article(title: str, url: str, description: str, pub_date: str, source_name: str):
+    """Сохраняет статью в Supabase"""
+    category = get_article_category(title)
+    
+    # Проверяем, не опубликована ли уже статья
+    if is_article_published(url):
+        log.info(f"ℹ️ Статья уже опубликована: {url}")
+        return False
+    
+    try:
+        data = {
+            'title': title,
+            'url': url,
+            'description': description,
+            'pub_date': pub_date,
+            'source_name': source_name,
+            'category': category
+        }
+        
+        supabase.table('published_articles').insert(data).execute()
+        log.info(f"✅ Статья сохранена в базу: {url}")
+        return True
+    except Exception as e:
+        log.error(f"❌ Ошибка сохранения статьи: {e}")
+        return False
+
+def format_message(source_name: str, title: str, link: str, summary: str, description: str) -> str:
+    """Форматирует сообщение в требуемом формате"""
+    # Общий формат для всех статей
+    return f"*{source_name}*:\n\n{title}\n\n{summary}\n\n{description}\n\nИсточник: {link}"
+
+def send_to_telegram(text: str) -> bool:
+    """Отправляет сообщение в Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
@@ -245,9 +190,7 @@ def send_to_telegram(text: str):
         "disable_web_page_preview": True,
     }
     try:
-        # Отправляем через прокси, если он настроен
-        proxies = PROXY if USE_PROXY and PROXY else None
-        r = requests.post(url, data=payload, proxies=proxies, timeout=15)
+        r = requests.post(url, data=payload, timeout=15)
         r.raise_for_status()
         log.info("✅ Сообщение отправлено в Telegram")
         return True
@@ -256,9 +199,11 @@ def send_to_telegram(text: str):
         return False
 
 def clean_text(t: str) -> str:
+    """Очищает текст от лишних пробелов и переносов"""
     return re.sub(r"\s+", " ", t).strip()
 
 def translate_to_russian(text: str) -> str:
+    """Переводит текст на русский язык"""
     try:
         return GoogleTranslator(source='auto', target='ru').translate(text)
     except Exception as e:
@@ -266,6 +211,7 @@ def translate_to_russian(text: str) -> str:
         return text
 
 def get_summary(title: str) -> str:
+    """Возвращает краткое описание новости"""
     low = title.lower()
     if re.search(r"svo|спецоперация|война|war|conflict|конфликт|наступление|offensive", low):
         return "⚔️ Военные события и операции."
@@ -275,27 +221,19 @@ def get_summary(title: str) -> str:
         return "🦠 Пандемия и биобезопасность."
     return "📰 Важные события."
 
-def format_message(source_name: str, title: str, link: str, summary: str) -> str:
-    """Форматирует сообщение в требуемом формате"""
-    # Пример для статьи про Нил и ГЭРБ
-    if "Atlantic Council" in source_name and "nile" in title.lower():
-        return f"*{source_name}* (жирный шрифт): Нил на перепутье: разрешение спора о ГЭРБ на фоне подъема паводковых вод в Египте\n\nПоследняя эскалация между Египтом, Суданом и Эфиопией совпадает с дипломатическим сдвигом со стороны Соединенных Штатов.\nСообщение «Нил на перепутье: разрешение спора о ГЭРБ на фоне повышения уровня паводковых вод в Египте» впервые появилось в Атлантическом совете.\n\nИсточник: {link}"
-    
-    # Общий формат для остальных статей
-    return f"*{source_name}*: {title}\n\n{summary}\n\nИсточник: {link}"
-
 # ================== ПАРСИНГ RSS ==================
 def fetch_rss_news() -> list:
-    seen = load_seen_links()
+    """Получает новости из RSS-лент"""
     result = []
-    session = create_session()
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
     for src in SOURCES:
         if len(result) >= MAX_PER_RUN:
             break
         try:
             log.info(f"🌐 Запрашиваем: {src['name']}")
-            resp = session.get(src["url"].strip(), timeout=45)  # Увеличиваем таймаут
+            resp = session.get(src["url"].strip(), timeout=30)
             
             if resp.status_code != 200:
                 log.warning(f"{src['name']}: HTTP {resp.status_code}, пропускаем")
@@ -314,26 +252,44 @@ def fetch_rss_news() -> list:
 
                 title_tag = item.find("title")
                 link_tag = item.find("link") or item.find("guid")
+                description_tag = item.find("description") or item.find("summary")
+                pub_date_tag = item.find("pubDate")
+
                 if not title_tag or not link_tag:
                     continue
 
                 title = clean_text(title_tag.get_text())
                 link = clean_text(link_tag.get_text() if hasattr(link_tag, 'get_text') else link_tag.text)
+                description = clean_text(description_tag.get_text()) if description_tag else ""
+                pub_date = clean_text(pub_date_tag.get_text()) if pub_date_tag else ""
+
                 if not title or not link:
                     continue
 
+                # Проверяем ключевые слова
                 if not any(re.search(kw, title, re.IGNORECASE) for kw in KEYWORDS):
                     continue
 
-                if link in seen:
+                # Проверяем, не была ли статья уже опубликована
+                if is_article_published(link):
                     continue
 
                 ru_title = translate_to_russian(title)
                 summary = get_summary(title)
-                msg = format_message(src['name'], ru_title, link, summary)
+                description_ru = translate_to_russian(description) if description else ""
+                msg = format_message(src['name'], ru_title, link, summary, description_ru)
+                
                 if len(msg) > 4000:  # Ограничение Telegram
                     msg = msg[:3997] + "..."
-                result.append({"msg": msg, "link": link})
+                    
+                result.append({
+                    "msg": msg, 
+                    "link": link,
+                    "title": title,
+                    "description": description,
+                    "pub_date": pub_date,
+                    "source_name": src['name']
+                })
 
         except Exception as e:
             log.error(f"❌ Ошибка при парсинге {src['name']}: {e}")
@@ -350,28 +306,30 @@ def job():
 
     for item in news:
         if send_to_telegram(item["msg"]):
-            save_seen_link(item["link"])
+            save_published_article(
+                item["title"],
+                item["link"],
+                item["description"],
+                item["pub_date"],
+                item["source_name"]
+            )
         time.sleep(1.5)
-
-# ================== ТЕСТОВАЯ ФУНКЦИЯ ==================
-def test_message():
-    """Отправляет тестовое сообщение для проверки формата"""
-    test_msg = "*Atlantic Council* (жирный шрифт): Нил на перепутье: разрешение спора о ГЭРБ на фоне подъема паводковых вод в Египте\n\nПоследняя эскалация между Египтом, Суданом и Эфиопией совпадает с дипломатическим сдвигом со стороны Соединенных Штатов.\nСообщение «Нил на перепутье: разрешение спора о ГЭРБ на фоне повышения уровня паводковых вод в Египте» впервые появилось в Атлантическом совете.\n\nИсточник: https://www.atlanticcouncil.org/blogs/menasource/the-nile-at-a-crossroads-navigating-the-gerd-dispute-as-egypts-floodwaters-rise/"
-    if send_to_telegram(test_msg):
-        log.info("✅ Тестовое сообщение успешно отправлено")
-    else:
-        log.error("❌ Не удалось отправить тестовое сообщение")
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     log.info(f"🚀 Бот запущен. Проверка каждые {CHECK_INTERVAL} минут.")
     
-    # Отправляем тестовое сообщение при запуске
-    test_message()
+    # Проверка подключения к Supabase
+    try:
+        response = supabase.table('published_articles').select('id').limit(1).execute()
+        log.info("✅ Подключение к Supabase проверено успешно")
+    except Exception as e:
+        log.error(f"❌ Ошибка подключения к Supabase: {e}")
+        raise SystemExit("Не удалось подключиться к Supabase")
     
     job()  # ✅ Первая проверка сразу после запуска
     
-    schedule.every(CHECK_INTERVAL).minutes.do(job)  # ✅ Проверка согласно настройкам
+    schedule.every(CHECK_INTERVAL).minutes.do(job)
 
     while True:
         schedule.run_pending()
