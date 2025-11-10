@@ -1,26 +1,27 @@
+import os
+import time
+import re
+import feedparser
 import requests
 from bs4 import BeautifulSoup
-import re
-from datetime import datetime
-import time
-import os
 from supabase import create_client
 from telegram.ext import Application
+from datetime import datetime
 from dateutil import parser as date_parser
+import html
 
-# Настройки (берутся из переменных окружения в продакшене)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "your-supabase-url")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-supabase-key")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "your-telegram-token")
-CHANNEL_IDS = ["@finanosint", "@time_n_John"]
+# --- Настройки из переменных окружения ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNELS = ["@finanosint", "@time_n_John"]
 
-# Инициализация
+# --- Инициализация ---
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Фильтры по категориям
+# --- Фильтры по категориям ---
 FILTERS = {
-
     "SVO": [
         r"\bsvo\b", r"\bспецоперация\b", r"\bspecial military operation\b",
         r"\bвойна\b", r"\bwar\b", r"\bconflict\b", r"\bконфликт\b",
@@ -73,126 +74,55 @@ FILTERS = {
     ]
 }
 
-# Компиляция регулярных выражений для производительности
+# --- Источники ---
+SOURCES = [
+    {"name": "The Economist", "rss": "https://www.economist.com/rss/latest/rss.xml"},
+    {"name": "Bloomberg", "rss": "https://feeds.bloomberg.com/markets/news.rss"},
+    {"name": "RAND Corporation", "rss": "https://www.rand.org/rss.xml"},
+    {"name": "CSIS", "rss": "https://www.csis.org/rss.xml"},
+    {"name": "Chatham House", "rss": "https://www.chathamhouse.org/feed"},
+    {"name": "Foreign Affairs", "rss": "https://www.foreignaffairs.com/rss.xml"},
+    {"name": "CFR", "rss": "https://www.cfr.org/rss.xml"},
+    {"name": "BBC Future", "rss": "https://www.bbc.com/future/rss"},
+    {"name": "Future Timeline", "rss": "https://futuretimeline.net/blog.rss"},
+    {"name": "Carnegie Endowment", "rss": "https://carnegieendowment.org/feed"},
+    {"name": "Bruegel", "rss": "https://bruegel.org/feed/"},
+    {"name": "E3G", "rss": "https://e3g.org/feed/"},
+    {"name": "Atlantic Council", "custom_parser": lambda: scrape_atlantic_council()},
+    {"name": "Good Judgment", "custom_parser": lambda: scrape_good_judgment()},
+    {"name": "Metaculus", "custom_parser": lambda: scrape_metaculus()},
+    {"name": "DNI Global Trends", "custom_parser": lambda: scrape_odni()},
+]
+
+# --- Компилируем регулярки ---
 COMPILED_FILTERS = {
-    cat: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+    cat: [re.compile(p, re.IGNORECASE) for p in patterns]
     for cat, patterns in FILTERS.items()
 }
 
-def scrape_atlantic_council(url="https://www.atlanticcouncil.org/blogs/ukrainealert/"):
-    """Парсер для Atlantic Council, особенно раздела UkraineAlert"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.encoding = 'utf-8'  # Явное указание кодировки
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Поиск всех статей в блоге UkraineAlert
-        articles = soup.find_all('article', class_=re.compile('post|article', re.I))
-        
-        results = []
-        for article in articles[:5]:  # Ограничиваем до 5 свежих статей
-            try:
-                # Извлечение заголовка
-                title_tag = article.find(['h2', 'h3', 'h1'], class_=re.compile('title|entry-title', re.I))
-                if not title_tag:
-                    continue
-                    
-                title = title_tag.get_text(strip=True)
-                
-                # Извлечение ссылки
-                link_tag = title_tag.find('a') if not hasattr(title_tag, 'href') else title_tag
-                if not link_tag:
-                    continue
-                    
-                link = link_tag['href'] if 'href' in link_tag.attrs else None
-                if not link:
-                    continue
-                    
-                if not link.startswith('http'):
-                    link = f"https://www.atlanticcouncil.org{link}"
-                
-                # Извлечение краткого описания
-                summary_tag = article.find('p', class_=re.compile('excerpt|summary|description', re.I))
-                summary = summary_tag.get_text(strip=True) if summary_tag else ""
-                
-                # Если нет краткого описания, возьмем первый абзац из контента
-                if not summary:
-                    content_div = article.find('div', class_=re.compile('content|entry-content', re.I))
-                    if content_div:
-                        first_p = content_div.find('p')
-                        summary = first_p.get_text(strip=True) if first_p else ""
-                
-                # Извлечение даты публикации
-                date_tag = article.find('time') or article.find(class_=re.compile('date|time', re.I))
-                pub_date = None
-                if date_tag:
-                    date_str = date_tag.get('datetime', '') or date_tag.get_text(strip=True)
-                    try:
-                        pub_date = date_parser.parse(date_str).isoformat()
-                    except:
-                        pub_date = datetime.now().isoformat()
-                else:
-                    pub_date = datetime.now().isoformat()
-                
-                results.append({
-                    "title": title,
-                    "url": link,
-                    "summary": summary[:300] + "..." if len(summary) > 300 else summary,  # Ограничиваем длину
-                    "pub_date": pub_date,
-                    "source": "Atlantic Council"
-                })
-            except Exception as e:
-                print(f"Ошибка при обработке статьи Atlantic Council: {e}")
-                continue
-                
-        return results
-    except Exception as e:
-        print(f"Критическая ошибка при парсинге Atlantic Council: {e}")
-        return []
-
-async def async_send_to_telegram(title, url, source, category, summary=None):
-    """Асинхронная отправка сообщения в Telegram"""
-    # Форматируем сообщение в требуемом формате
-    message = (
-        f"<b>{source.upper()}</b>: {title}\n\n"
-    )
-    
-    if summary:
-        message += f"{summary}\n\n"
-    
-    message += f"Источник: <a href='{url}'>{source}</a>"
-    
-    for channel in CHANNEL_IDS:
-        try:
-            await application.bot.send_message(
-                chat_id=channel,
-                text=message,
-                parse_mode="HTML",
-                disable_web_page_preview=False
-            )
-            print(f"✅ Отправлено в {channel}: {title[:50]}...")
-        except Exception as e:
-            print(f"❌ Ошибка отправки в {channel}: {e}")
-
-def send_to_telegram(title, url, source, category, summary=None):
-    """Синхронная обертка для отправки сообщения"""
-    import asyncio
-    asyncio.run(async_send_to_telegram(title, url, source, category, summary))
+# --- Функции ---
+def contains_keywords(text, category):
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in COMPILED_FILTERS[category])
 
 def classify_article(title, summary):
-    """Классификация статьи по категориям"""
     text = f"{title} {summary}".lower()
-    
-    for category, patterns in COMPILED_FILTERS.items():
-        if any(pattern.search(text) for pattern in patterns):
+    for category in ["SVO", "Crypto", "Pandemic"]:
+        if contains_keywords(text, category):
             return category
     return None
 
+def is_recent(entry, max_hours=2):
+    try:
+        pub = date_parser.parse(entry.published)
+        now = datetime.now(pub.tzinfo)
+        diff_hours = (now - pub).total_seconds() / 3600
+        return diff_hours < max_hours
+    except:
+        return True
+
 def article_exists(url):
-    """Проверка существования статьи в базе"""
     try:
         response = supabase.table("news_articles").select("id").eq("url", url).execute()
         return len(response.data) > 0
@@ -201,7 +131,6 @@ def article_exists(url):
         return False
 
 def save_article(title, url, description, pub_date, source, category):
-    """Сохранение статьи в базу данных"""
     try:
         supabase.table("news_articles").insert({
             "title": title,
@@ -216,54 +145,358 @@ def save_article(title, url, description, pub_date, source, category):
         print(f"Ошибка сохранения статьи: {e}")
         return False
 
-def process_atlantic_council_articles():
-    """Обработка статей с Atlantic Council"""
+async def async_send_to_telegram(title, url, source, category, summary=None):
+    # Форматируем сообщение в требуемом формате
+    message = f"<b>{source.upper()}</b>: {title}\n\n"
+    
+    if summary:
+        # Ограничиваем длину описания
+        summary = summary[:500] + "..." if len(summary) > 500 else summary
+        message += f"{summary}\n\n"
+    
+    message += f"Источник: <a href='{url}'>{source}</a>"
+    
+    for channel in CHANNELS:
+        try:
+            await app.bot.send_message(
+                chat_id=channel,
+                text=message,
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
+            print(f"✅ Отправлено в {channel}: {title[:50]}...")
+        except Exception as e:
+            print(f"❌ Ошибка отправки в {channel}: {e}")
+
+def send_to_telegram(title, url, source, category, summary=None):
+    import asyncio
+    asyncio.run(async_send_to_telegram(title, url, source, category, summary))
+
+# --- Специализированный парсер для Atlantic Council ---
+def scrape_atlantic_council(url="https://www.atlanticcouncil.org/blogs/ukrainealert/"):
+    """Улучшенный парсер для Atlantic Council, особенно раздела UkraineAlert"""
     print("🔍 Парсинг статей Atlantic Council...")
-    articles = scrape_atlantic_council()
-    
-    if not articles:
-        print("❌ Не удалось получить статьи Atlantic Council")
-        return
-    
-    for article in articles:
-        # Проверяем, не существует ли уже такая статья
-        if article_exists(article['url']):
-            print(f"⏩ Статья уже существует: {article['title'][:50]}...")
-            continue
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    try:
+        # Увеличиваем таймаут для надежности
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()  # Проверяем на HTTP ошибки
         
-        # Классифицируем статью
-        category = classify_article(article['title'], article['summary'])
+        # Явно указываем кодировку
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        if category:
-            print(f"✅ Найдена релевантная статья [{category}]: {article['title']}")
+        # Ищем статьи в блоге UkraineAlert
+        articles = []
+        
+        # Вариант 1: Ищем по контейнерам статей
+        article_containers = soup.find_all('article', class_=lambda x: x and ('post' in x.lower() or 'article' in x.lower()))
+        
+        if not article_containers:
+            # Вариант 2: Ищем по другим признакам
+            article_containers = soup.select('div[class*="blog-post"], div[class*="post-"]')
+        
+        if not article_containers:
+            # Вариант 3: Ищем по заголовкам h2/h3 с ссылками
+            titles = soup.find_all(['h2', 'h3'])
+            for title in titles:
+                link = title.find('a')
+                if link and '/blogs/ukrainealert/' in link.get('href', ''):
+                    article_containers.append(title.parent)
+        
+        print(f"Найдено контейнеров статей: {len(article_containers)}")
+        
+        for container in article_containers[:5]:  # Ограничиваем до 5 свежих статей
+            try:
+                # Ищем заголовок
+                title_tag = container.find(['h1', 'h2', 'h3'], class_=lambda x: x and ('title' in x.lower() or 'headline' in x.lower()))
+                if not title_tag:
+                    # Альтернативный поиск заголовка
+                    title_tag = container.select_one('h2 a, h3 a, .post-title a, .entry-title a')
+                    if title_tag and title_tag.name == 'a':
+                        title = title_tag.get_text(strip=True)
+                        link = title_tag.get('href')
+                    else:
+                        continue
+                else:
+                    title = title_tag.get_text(strip=True)
+                    link_tag = title_tag.find('a')
+                    link = link_tag.get('href') if link_tag else None
+                
+                if not link:
+                    continue
+                
+                # Нормализуем ссылку
+                if not link.startswith('http'):
+                    if link.startswith('/'):
+                        link = f"https://www.atlanticcouncil.org{link}"
+                    else:
+                        link = f"https://www.atlanticcouncil.org/blogs/ukrainealert/{link}"
+                
+                # Получаем описание
+                summary = ""
+                summary_tag = container.find('p', class_=lambda x: x and ('excerpt' in x.lower() or 'summary' in x.lower() or 'description' in x.lower()))
+                if not summary_tag:
+                    summary_tag = container.select_one('div.entry-content p, .post-content p, .article-content p')
+                
+                if summary_tag:
+                    summary = summary_tag.get_text(strip=True)
+                
+                # Если нет описания, пробуем получить из meta-тегов при переходе на страницу статьи
+                if not summary:
+                    try:
+                        article_response = requests.get(link, headers=headers, timeout=15)
+                        article_response.encoding = 'utf-8'
+                        article_soup = BeautifulSoup(article_response.text, 'html.parser')
+                        
+                        # Ищем первый абзац в основном контенте
+                        content_div = article_soup.select_one('div.entry-content, div.post-content, div.article-content, div.blog-content')
+                        if content_div:
+                            first_p = content_div.find('p')
+                            if first_p:
+                                summary = first_p.get_text(strip=True)[:300] + "..."
+                    except Exception as e:
+                        print(f"Не удалось получить описание со страницы статьи: {e}")
+                
+                # Ищем дату публикации
+                pub_date = datetime.now().isoformat()
+                date_tag = container.find('time') or container.select_one('time, .date, .published')
+                if date_tag:
+                    date_str = date_tag.get('datetime') or date_tag.get_text(strip=True)
+                    try:
+                        if date_str:
+                            pub_date_obj = date_parser.parse(date_str)
+                            pub_date = pub_date_obj.isoformat()
+                    except Exception as e:
+                        print(f"Не удалось распарсить дату: {e}")
+                
+                # Создаем статью
+                article = {
+                    "title": html.unescape(title),
+                    "url": link,
+                    "summary": html.unescape(summary) if summary else "Описание отсутствует",
+                    "pub_date": pub_date,
+                    "source": "Atlantic Council"
+                }
+                articles.append(article)
+                print(f"✅ Найдена статья: {title[:60]}...")
+                
+            except Exception as e:
+                print(f"Ошибка при обработке статьи: {e}")
+                continue
+        
+        if not articles:
+            print("⚠️ Статьи не найдены. Структура сайта могла измениться.")
+            # Для отладки сохраняем HTML в лог
+            print(f"🔍 Фрагмент HTML: {response.text[:500]}...")
+        
+        return articles
+        
+    except Exception as e:
+        print(f"❌ Критическая ошибка при парсинге Atlantic Council: {e}")
+        print(f"Статус ответа: {response.status_code if 'response' in locals() else 'Нет ответа'}")
+        return []
+
+# --- Парсеры для других сайтов ---
+def scrape_good_judgment():
+    print("🔍 Парсинг статей Good Judgment...")
+    url = "https://goodjudgment.com/blog"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Поиск статей
+        posts = soup.select('article.post, div.blog-post, .post-item')[:5]
+        
+        for post in posts:
+            title_tag = post.select_one('h2, h3, .post-title, .entry-title')
+            if not title_tag:
+                continue
+                
+            title = title_tag.get_text(strip=True)
+            link_tag = title_tag.find('a') or post.select_one('a.read-more, a.more-link')
+            if not link_tag:
+                continue
+                
+            link = link_tag.get('href')
+            if not link.startswith('http'):
+                link = "https://goodjudgment.com" + link
+                
+            summary_tag = post.select_one('p.excerpt, .post-excerpt, .entry-summary, p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
             
-            # Сохраняем в базу
-            if save_article(
-                article['title'],
-                article['url'],
-                article['summary'],
-                article['pub_date'],
-                article['source'],
-                category
-            ):
-                # Отправляем в Telegram
-                send_to_telegram(
-                    article['title'],
-                    article['url'],
-                    article['source'],
-                    category,
-                    article['summary']
-                )
+            pub_date = datetime.now().isoformat()
+            date_tag = post.select_one('time, .date, .published')
+            if date_tag:
+                date_str = date_tag.get('datetime') or date_tag.get_text(strip=True)
+                try:
+                    pub_date = date_parser.parse(date_str).isoformat()
+                except:
+                    pass
+            
+            if article_exists(link):
+                print(f"⏩ Статья уже существует: {title[:50]}...")
+                continue
+                
+            category = classify_article(title, summary)
+            if category:
+                print(f"✅ Найдена релевантная статья [{category}]: {title}")
+                if save_article(title, link, summary, pub_date, "Good Judgment", category):
+                    send_to_telegram(title, link, "Good Judgment", category, summary)
+            else:
+                print(f"⏭️ Статья не прошла фильтрацию: {title[:50]}...")
+                
+    except Exception as e:
+        print(f"❌ Ошибка парсинга Good Judgment: {e}")
+
+def scrape_metaculus():
+    print("🔍 Парсинг статей Metaculus...")
+    url = "https://www.metaculus.com/questions/"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Поиск вопросов/статей
+        items = soup.select('div.question-card, .question-list-item, .forecast-item')[:5]
+        
+        for item in items:
+            title_tag = item.select_one('a.title-link, h3 a, .question-title a')
+            if not title_tag:
+                continue
+                
+            title = title_tag.get_text(strip=True)
+            link = "https://www.metaculus.com" + title_tag.get('href')
+            
+            summary_tag = item.select_one('div.blurb, .question-description, p.description')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
+            
+            pub_date = datetime.now().isoformat()
+            
+            if article_exists(link):
+                print(f"⏩ Статья уже существует: {title[:50]}...")
+                continue
+                
+            category = classify_article(title, summary)
+            if category:
+                print(f"✅ Найдена релевантная статья [{category}]: {title}")
+                if save_article(title, link, summary, pub_date, "Metaculus", category):
+                    send_to_telegram(title, link, "Metaculus", category, summary)
+            else:
+                print(f"⏭️ Статья не прошла фильтрацию: {title[:50]}...")
+                
+    except Exception as e:
+        print(f"❌ Ошибка парсинга Metaculus: {e}")
+
+def scrape_odni():
+    print("🔍 Парсинг статей DNI Global Trends...")
+    url = "https://www.dni.gov/index.php/gt2040-home"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Поиск статей/отчетов
+        articles = soup.select('div.article, .press-release, .report-item, .content-item')[:5]
+        
+        for article in articles:
+            title_tag = article.select_one('h2, h3, .title, .headline')
+            if not title_tag:
+                continue
+                
+            title = title_tag.get_text(strip=True)
+            link_tag = title_tag.find('a')
+            if link_tag:
+                link = link_tag.get('href')
+                if not link.startswith('http'):
+                    link = "https://www.dni.gov" + link
+            else:
+                link = url
+            
+            summary_tag = article.select_one('p.summary, .description, p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else ""
+            
+            pub_date = datetime.now().isoformat()
+            
+            if article_exists(link):
+                print(f"⏩ Статья уже существует: {title[:50]}...")
+                continue
+                
+            category = classify_article(title, summary)
+            if category:
+                print(f"✅ Найдена релевантная статья [{category}]: {title}")
+                if save_article(title, link, summary, pub_date, "DNI Global Trends", category):
+                    send_to_telegram(title, link, "DNI Global Trends", category, summary)
+            else:
+                print(f"⏭️ Статья не прошла фильтрацию: {title[:50]}...")
+                
+    except Exception as e:
+        print(f"❌ Ошибка парсинга DNI: {e}")
+
+# --- RSS парсеры ---
+def fetch_from_rss(source):
+    print(f"🔍 Получение статей из RSS: {source['name']}")
+    try:
+        feed = feedparser.parse(source["rss"])
+        if feed.bozo:
+            print(f"⚠️ Ошибка парсинга RSS {source['name']}: {feed.bozo_exception}")
+            return
+            
+        print(f"Получено статей из {source['name']}: {len(feed.entries)}")
+        
+        for entry in feed.entries[:10]:  # Ограничиваем до 10 свежих статей
+            url = entry.link
+            title = entry.title.strip()
+            summary = entry.get("summary", "") or entry.get("description", "")
+            pub_date = entry.get("published", datetime.now().isoformat())
+            
+            if not url or not title:
+                continue
+                
+            if not is_recent(entry, max_hours=2):
+                continue
+                
+            if article_exists(url):
+                print(f"⏩ Статья уже существует: {title[:50]}...")
+                continue
+                
+            category = classify_article(title, summary)
+            if category:
+                print(f"✅ Найдена релевантная статья [{category}]: {title}")
+                if save_article(title, url, summary, pub_date, source["name"], category):
+                    send_to_telegram(title, url, source["name"], category, summary)
+            else:
+                print(f"⏭️ Статья не прошла фильтрацию: {title[:50]}...")
+                
+    except Exception as e:
+        print(f"❌ Ошибка обработки {source['name']}: {e}")
+
+def fetch_and_process():
+    for source in SOURCES:
+        if "custom_parser" in source:
+            print(f"\n🔍 Обработка источника: {source['name']} (кастомный парсер)")
+            source["custom_parser"]()
         else:
-            print(f"⏭️ Статья не прошла фильтрацию: {article['title'][:50]}...")
+            print(f"\n🔍 Обработка источника: {source['name']} (RSS)")
+            fetch_from_rss(source)
 
-def main():
-    """Основная функция"""
-    print("🚀 Запуск обработки новостей Atlantic Council...")
-    process_atlantic_council_articles()
-    print("✅ Обработка завершена")
-
+# --- Основной цикл ---
 if __name__ == "__main__":
-    main()
-
-
+    print("🚀 Background Worker запущен. Ожидание 14 минут между проверками...")
+    while True:
+        print(f"\n{'='*50}")
+        print(f"🕒 Проверка всех источников: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        fetch_and_process()
+        print(f"{'='*50}")
+        print(f"⏳ Следующая проверка через 14 минут...")
+        time.sleep(14 * 60)
