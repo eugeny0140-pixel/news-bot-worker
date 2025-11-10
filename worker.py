@@ -1,4 +1,4 @@
-# russia_thinktank_bot.py
+# worker.py
 import json
 import os
 import re
