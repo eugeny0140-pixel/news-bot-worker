@@ -132,7 +132,7 @@ HEADERS = {
 def is_article_published(url: str) -> bool:
     """Проверяет, была ли статья уже опубликована"""
     try:
-        response = supabase.table('published_articles').select('id').eq('url', url).execute()
+        response = supabase.table('news_articles').select('id').eq('url', url).execute()
         return bool(response.data)
     except Exception as e:
         log.error(f"Ошибка при проверке публикации: {e}")
@@ -149,7 +149,7 @@ def get_article_category(title: str) -> str:
         return "Pandemic"
     return "Other"
 
-def save_published_article(title: str, url: str, description: str, pub_date: str, source_name: str):
+def save_article(title: str, url: str, description: str, pub_date: str, source_name: str):
     """Сохраняет статью в Supabase"""
     category = get_article_category(title)
     
@@ -168,17 +168,21 @@ def save_published_article(title: str, url: str, description: str, pub_date: str
             'category': category
         }
         
-        supabase.table('published_articles').insert(data).execute()
+        supabase.table('news_articles').insert(data).execute()
         log.info(f"✅ Статья сохранена в базу: {url}")
         return True
     except Exception as e:
         log.error(f"❌ Ошибка сохранения статьи: {e}")
         return False
 
-def format_message(source_name: str, title: str, link: str, summary: str, description: str) -> str:
+def format_message(source_name: str, title: str, link: str, description: str) -> str:
     """Форматирует сообщение в требуемом формате"""
-    # Общий формат для всех статей
-    return f"*{source_name}*:\n\n{title}\n\n{summary}\n\n{description}\n\nИсточник: {link}"
+    # Используем только первые 2-3 предложения описания как краткий лит
+    sentences = [s.strip() for s in description.split('. ') if s.strip()]
+    brief = ". ".join(sentences[:2]) + "." if sentences else ""
+    
+    # Форматируем сообщение по требуемому шаблону
+    return f"*{source_name}*:\n\n{title}\n\n{brief}\n\nИсточник: {link}"
 
 def send_to_telegram(text: str) -> bool:
     """Отправляет сообщение в Telegram"""
@@ -209,17 +213,6 @@ def translate_to_russian(text: str) -> str:
     except Exception as e:
         log.warning(f"⚠️ Перевод не удался: {e}")
         return text
-
-def get_summary(title: str) -> str:
-    """Возвращает краткое описание новости"""
-    low = title.lower()
-    if re.search(r"svo|спецоперация|война|war|conflict|конфликт|наступление|offensive", low):
-        return "⚔️ Военные события и операции."
-    if re.search(r"bitcoin|btc|ethereum|eth|криптовалюта|crypto|цифровой рубль", low):
-        return "💰 Криптовалюта и цифровые активы."
-    if re.search(r"pandemic|пандемия|вирус|virus|вакцина|vaccine|бустер|booster", low):
-        return "🦠 Пандемия и биобезопасность."
-    return "📰 Важные события."
 
 # ================== ПАРСИНГ RSS ==================
 def fetch_rss_news() -> list:
@@ -275,9 +268,8 @@ def fetch_rss_news() -> list:
                     continue
 
                 ru_title = translate_to_russian(title)
-                summary = get_summary(title)
                 description_ru = translate_to_russian(description) if description else ""
-                msg = format_message(src['name'], ru_title, link, summary, description_ru)
+                msg = format_message(src['name'], ru_title, link, description_ru)
                 
                 if len(msg) > 4000:  # Ограничение Telegram
                     msg = msg[:3997] + "..."
@@ -306,7 +298,7 @@ def job():
 
     for item in news:
         if send_to_telegram(item["msg"]):
-            save_published_article(
+            save_article(
                 item["title"],
                 item["link"],
                 item["description"],
@@ -321,7 +313,7 @@ if __name__ == "__main__":
     
     # Проверка подключения к Supabase
     try:
-        response = supabase.table('published_articles').select('id').limit(1).execute()
+        response = supabase.table('news_articles').select('id').limit(1).execute()
         log.info("✅ Подключение к Supabase проверено успешно")
     except Exception as e:
         log.error(f"❌ Ошибка подключения к Supabase: {e}")
