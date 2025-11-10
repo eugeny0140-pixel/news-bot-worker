@@ -12,19 +12,30 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ================== НАСТРОЙКИ ==================
-TELEGRAM_TOKEN = "8325055385:AAH9MfCjpfBNeDSrybE2SKwunDw7QjayQAM"
-CHANNEL_ID = "@time_n_John"
+# 🔑 Токен берется из переменной окружения (для Render.com)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    raise ValueError("❌ Ошибка: переменная окружения TELEGRAM_TOKEN не установлена")
 
-# 🔌 Прокси (оставьте пустым, если не используется)
-PROXY = {
-    # Пример для SOCKS5:
-    # "http": "socks5://user:pass@ip:port",
-    # "https": "socks5://user:pass@ip:port",
-    
-    # Пример для HTTP:
-    # "http": "http://user:pass@ip:port",
-    # "https": "http://user:pass@ip:port",
-}
+CHANNEL_ID = os.getenv('CHANNEL_ID', "@time_n_John")  # Можно также задать через переменную окружения
+
+# 🔌 Прокси (можно задать через переменные окружения)
+PROXY_TYPE = os.getenv('PROXY_TYPE', '')  # socks5, http
+PROXY_HOST = os.getenv('PROXY_HOST', '')
+PROXY_PORT = os.getenv('PROXY_PORT', '')
+PROXY_USER = os.getenv('PROXY_USER', '')
+PROXY_PASS = os.getenv('PROXY_PASS', '')
+
+PROXY = {}
+if PROXY_TYPE and PROXY_HOST and PROXY_PORT:
+    proxy_url = f"{PROXY_TYPE}://"
+    if PROXY_USER and PROXY_PASS:
+        proxy_url += f"{PROXY_USER}:{PROXY_PASS}@"
+    proxy_url += f"{PROXY_HOST}:{PROXY_PORT}"
+    PROXY = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
 
 # ================== ВСЕ ИСТОЧНИКИ (КАНАЛЫ) ==================
 SOURCES = [
@@ -123,6 +134,7 @@ KEYWORDS = [
 SEEN_FILE = "seen_links.json"
 MAX_SEEN = 5000
 MAX_PER_RUN = 7
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 15))  # Интервал проверки в минутах
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -301,11 +313,11 @@ def job():
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
-    log.info("Бот запущен. Проверка каждые 15 минут.")
+    log.info(f"Бот запущен. Проверка каждые {CHECK_INTERVAL} минут.")
     
     job()  # ✅ Первая проверка сразу после запуска
     
-    schedule.every(15).minutes.do(job)  # ✅ Проверка каждые 15 минут
+    schedule.every(CHECK_INTERVAL).minutes.do(job)  # ✅ Проверка согласно настройкам
 
     while True:
         schedule.run_pending()
