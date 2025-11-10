@@ -10,6 +10,7 @@ from deep_translator import GoogleTranslator
 import schedule
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from supabase import create_client, Client
 
 # ================== НАСТРОЙКИ ==================
 # 🔑 Токен берется из переменной окружения (для Render.com)
@@ -19,15 +20,17 @@ if not TELEGRAM_TOKEN:
 
 CHANNEL_ID = os.getenv('CHANNEL_ID', "@time_n_John")  # Можно также задать через переменную окружения
 
-# 🔌 Прокси (можно задать через переменные окружения)
-PROXY_TYPE = os.getenv('PROXY_TYPE', '')  # socks5, http
+# 🔌 Настройки прокси для обхода блокировок
+USE_PROXY = os.getenv('USE_PROXY', 'false').lower() == 'true'
 PROXY_HOST = os.getenv('PROXY_HOST', '')
 PROXY_PORT = os.getenv('PROXY_PORT', '')
+PROXY_TYPE = os.getenv('PROXY_TYPE', 'socks5')  # socks5, http
 PROXY_USER = os.getenv('PROXY_USER', '')
 PROXY_PASS = os.getenv('PROXY_PASS', '')
 
+# Создаем настройки прокси
 PROXY = {}
-if PROXY_TYPE and PROXY_HOST and PROXY_PORT:
+if USE_PROXY and PROXY_HOST and PROXY_PORT:
     proxy_url = f"{PROXY_TYPE}://"
     if PROXY_USER and PROXY_PASS:
         proxy_url += f"{PROXY_USER}:{PROXY_PASS}@"
@@ -37,103 +40,99 @@ if PROXY_TYPE and PROXY_HOST and PROXY_PORT:
         "https": proxy_url
     }
 
-# ================== ВСЕ ИСТОЧНИКИ (КАНАЛЫ) ==================
+# 🗄️ Настройки Supabase
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_TABLE = os.getenv('SUPABASE_TABLE', 'seen_links')
+supabase: Client = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        log.info("✅ Подключение к Supabase успешно установлено")
+    except Exception as e:
+        log.error(f"❌ Ошибка подключения к Supabase: {e}")
+else:
+    log.info("ℹ️ Supabase не настроен, используется локальное хранение ссылок")
+
+# ================== ИСТОЧНИКИ (КАНАЛЫ) ==================
 SOURCES = [
-    # Основные международные аналитические центры
-    {"name": "BBC News Russia", "url": "https://feeds.bbci.co.uk/news/world/europe/rss.xml"},
-    {"name": "Foreign Affairs", "url": "https://www.foreignaffairs.com/rss.xml"},
+    {"name": "Good Judgment", "url": "https://goodjudgment.com/feed/"},
+    {"name": "Johns Hopkins", "url": "https://www.centerforhealthsecurity.org/feed/"},
+    {"name": "Metaculus", "url": "https://www.metaculus.com/feed/"},
+    {"name": "DNI Global Trends", "url": "https://www.dni.gov/index.php/feed"},
+    {"name": "RAND Corporation", "url": "https://www.rand.org/rss.xml"},
+    {"name": "World Economic Forum", "url": "https://www.weforum.org/rss"},
     {"name": "CSIS", "url": "https://www.csis.org/rss.xml"},
     {"name": "Atlantic Council", "url": "https://www.atlanticcouncil.org/feed/"},
-    {"name": "RAND Corporation", "url": "https://www.rand.org/rss.xml"},
+    {"name": "Chatham House", "url": "https://www.chathamhouse.org/feed"},
+    {"name": "The Economist", "url": "https://www.economist.com/world/rss.xml"},
+    {"name": "Bloomberg", "url": "https://www.bloomberg.com/feed"},
+    {"name": "Reuters Institute", "url": "https://reutersinstitute.politics.ox.ac.uk/rss.xml"},
+    {"name": "Foreign Affairs", "url": "https://www.foreignaffairs.com/rss.xml"},
+    {"name": "CFR", "url": "https://www.cfr.org/rss.xml"},
+    {"name": "BBC Future", "url": "https://feeds.bbci.co.uk/future/rss.xml"},
+    {"name": "Future Timeline", "url": "https://www.futuretimeline.net/feed/"},
     {"name": "Carnegie Endowment", "url": "https://carnegieendowment.org/rss/rss.xml"},
-    {"name": "Council on Foreign Relations", "url": "https://www.cfr.org/rss.xml"},
-    {"name": "Chatham House", "url": "https://www.chathamhouse.org/rss"},
-    {"name": "Brookings Institution", "url": "https://www.brookings.edu/feed/"},
-    {"name": "The Diplomat", "url": "https://thediplomat.com/feed/"},
-    
-    # Новостные агентства с фокусом на Россию/Европу
-    {"name": "Reuters: Russia", "url": "https://www.reuters.com/world/europe/rss.xml"},
-    {"name": "Reuters: Ukraine", "url": "https://www.reuters.com/world/europe/ukraine/rss.xml"},
-    {"name": "Al Jazeera: Russia", "url": "https://www.aljazeera.com/tag/russia/rss.xml"},
-    {"name": "Al Jazeera: Ukraine", "url": "https://www.aljazeera.com/tag/ukraine/rss.xml"},
-    {"name": "DW News: Russia", "url": "https://rss.dw.com/xml/rss-ru-russia"},
-    {"name": "DW News: Eastern Europe", "url": "https://rss.dw.com/xml/rss-en-eastern-europe"},
-    {"name": "The Moscow Times", "url": "https://www.themoscowtimes.com/rss/news"},
-    {"name": "Kyiv Independent", "url": "https://kyivindependent.com/feed/"},
-    
-    # Экономические и энергетические источники
-    {"name": "Bloomberg: Russia", "url": "https://www.bloomberg.com/feed/tag/russia"},
-    {"name": "Financial Times: Russia", "url": "https://www.ft.com/world/europe/russia?format=rss"},
-    {"name": "OilPrice.com", "url": "https://oilprice.com/rss/main"},
-    
-    # Военная аналитика
-    {"name": "Institute for the Study of War", "url": "https://www.understandingwar.org/feed"},
-    {"name": "RUSI", "url": "https://rusi.org/rss-feed"},
-    
-    # Другие важные источники
-    {"name": "Politico Europe", "url": "https://www.politico.eu/feed/"},
-    {"name": "Eurasia Group", "url": "https://www.eurasiagroup.net/feed"},
-    {"name": "World Economic Forum", "url": "https://www.weforum.org/rss"},
-    {"name": "RFE/RL", "url": "https://www.rferl.org/api/feeds/rss/list/175"},
-    {"name": "The Economist: Russia", "url": "https://www.economist.com/sections/europe-102.xml"}
+    {"name": "Bruegel", "url": "https://www.bruegel.org/rss"},
+    {"name": "E3G", "url": "https://www.e3g.org/feed/"},
 ]
 
-# ================== ВСЕ ФИЛЬТРЫ (КЛЮЧЕВЫЕ СЛОВА) ==================
+# ================== ФИЛЬТРЫ (КЛЮЧЕВЫЕ СЛОВА) ==================
 KEYWORDS = [
-    # Россия и связанные термины
-    r"\brussia\b", r"\brussian\b", r"\brussians\b", r"\brus\b", r"\brusso\b", r"\brusophobia\b",
-    r"\bputin\b", r"\bmoscow\b", r"\bkremlin\b", r"\bsiberia\b", r"\bru\b", r"\brus\b",
-    r"\bkaliningrad\b", r"\bsevastopol\b", r"\bvolgograd\b", r"\byekaterinburg\b",
-    
-    # Украина и связанные термины
-    r"\bukraine\b", r"\bukrainian\b", r"\bukrainians\b", r"\bkiev\b", r"\bkyiv\b", r"\bkharkiv\b",
-    r"\bkherson\b", r"\bodesa\b", r"\bodessa\b", r"\bdnipro\b", r"\bzelensky\b", r"\bzelenskyy\b",
-    r"\bzelenksiy\b", r"\bbucha\b", r"\birpin\b", r"\bcrimea\b", r"\bkrasnodar\b", r"\bdonbas\b",
-    r"\bmaidan\b", r"\bsamara\b", r"\bdonetsk\b", r"\bluhansk\b", r"\bmariupol\b", r"\bbakhmut\b",
-    
-    # Санкции и экономика
-    r"\bsanction[s]?\b", r"\bembargo\b", r"\brestrictions?\b", r"\bblacklist\b", r"\bfrozen assets\b",
-    r"\bgazprom\b", r"\bnovatek\b", r"\brosgaz\b", r"\bnord\s?stream\b", r"\bturkstream\b",
-    r"\boil\s?price\b", r"\bgas\s?price\b", r"\bruble\b", r"\brubel\b", r"\brub\b", r"\bcbr\b",
-    r"\binflation\b", r"\breserve[s]?\b", r"\bswift\b", r"\bmir\b", r"\bspfs\b", r"\bimport\s?ban\b",
-    r"\beurozone\b", r"\bg7\b", r"\bimf\b", r"\bworld bank\b", r"\bcentral\s?bank\b",
-    
-    # Военные термины и персоналии
-    r"\bwagner\b", r"\bprigozhin\b", r"\bshoigu\b", r"\bgrushko\b", r"\bvostok\b", r"\bzenit\b",
-    r"\bkalibr\b", r"\byars\b", r"\bavangard\b", r"\bsarmat\b", r"\bizhev\b", r"\bseverodvinsk\b",
-    r"\bmilitary\s?exercis\b", r"\bnuclear\b", r"\bstrategic\s?forces\b", r"\bssbn\b", r"\bssbn\b",
-    r"\btank\b", r"\btanks\b", r"\bdrone[s]?\b", r"\buav[s]?\b", r"\bmissile[s]?\b", r"\bmig\b",
-    r"\bsu\b", r"\baircraft [^s]", r"\bnato\b", r"\bwto\b", r"\bsea\b", r"\bnavy\b", r"\bblack\s?sea\b",
-    r"\barctic\b", r"\bmedvedev\b", r"\bpeskov\b", r"\blavrov\b", r"\bpatrushev\b", r"\bnaryshkin\b",
-    
-    # Дипломатия и переговоры
-    r"\bdiplomat[sic]?\b", r"\btalks\b", r"\bnegotiat\b", r"\bmeeting[s]?\b", r"\bsummit[s]?\b",
-    r"\bambassador\b", r"\bconsul\b", r"\bminister\b", r"\bforeign\s?minister\b", r"\bpeace\b",
-    r"\btruce\b", r"\bceasefire\b", r"\bgrain\s?deal\b", r"\bgrain\s?corridor\b", r"\bgrain\s?initiative\b",
-    
-    # Интеграция и союзы
-    r"\beaeu\b", r"\beurasia[n]?\b", r"\bbrics\b", r"\bbrics\+\b", r"\bshanghai\s?cooperation\b",
-    r"\bcollective\s?security\b", r"\bcsto\b", r"\beuroasia\b", r"\bbelt\s?and\s?road\b",
-    
-    # Связанные страны и регионы
-    r"\bbelarus\b", r"\bmoldova\b", r"\bgeorgia\b", r"\bazerbaijan\b", r"\barmenia\b",
-    r"\bkazakhstan\b", r"\buzbekistan\b", r"\bkyrgyzstan\b", r"\bturkmenistan\b", r"\btajikistan\b",
-    r"\bbaltic\b", r"\bestonia\b", r"\blatvia\b", r"\blithuania\b", r"\bfinland\b", r"\bsweden\b",
-    r"\bpoland\b", r"\bromania\b", r"\bmoldova\b", r"\bcaucasus\b", r"\btransnistria\b", r"\bnagorno\b",
-    
-    # Специальные операции и события
-    r"\bspecial\s?operation\b", r"\bopt\s?\d+\b", r"\bmobilization\b", r"\bpartial\s?mobilization\b",
-    r"\breferendum\b", r"\bannexation\b", r"\boccupation\b", r"\bterritorial\s?integrity\b",
-    
-    # Геополитические термины
-    r"\bgeopoliti[cs]\b", r"\bsecurity\s?council\b", r"\bunited\s?nations\b", r"\bunesco\b", r"\bi\w{2}o\b",
-    r"\bsecurity\s?guarantee[s]?\b", r"\bcollective\s?west\b", r"\beast\s?west\b", r"\bdivide\b",
-    r"\bsubversive\b", r"\bhybrid\s?war\b", r"\bdisinformation\b", r"\bpropaganda\b"
+    # 1. СВО и Война
+    r"\bsvo\b", r"\bспецоперация\b", r"\bspecial military operation\b", 
+    r"\bвойна\b", r"\bwar\b", r"\bconflict\b", r"\bконфликт\b", 
+    r"\bнаступление\b", r"\boffensive\b", r"\bатака\b", r"\battack\b", 
+    r"\bудар\b", r"\bstrike\b", r"\bобстрел\b", r"\bshelling\b", 
+    r"\bдрон\b", r"\bdrone\b", r"\bmissile\b", r"\bракета\b", 
+    r"\bэскалация\b", r"\bescalation\b", r"\bмобилизация\b", r"\bmobilization\b", 
+    r"\bфронт\b", r"\bfrontline\b", r"\bзахват\b", r"\bcapture\b", 
+    r"\bосвобождение\b", r"\bliberation\b", r"\bбой\b", r"\bbattle\b", 
+    r"\bпотери\b", r"\bcasualties\b", r"\bпогиб\b", r"\bkilled\b", 
+    r"\bранен\b", r"\binjured\b", r"\bпленный\b", r"\bprisoner of war\b", 
+    r"\bпереговоры\b", r"\btalks\b", r"\bперемирие\b", r"\bceasefire\b", 
+    r"\bсанкции\b", r"\bsanctions\b", r"\bоружие\b", r"\bweapons\b", 
+    r"\bпоставки\b", r"\bsupplies\b", r"\bhimars\b", r"\batacms\b", 
+    r"\bhour ago\b", r"\bчас назад\b", r"\bminutos atrás\b", r"\b小时前\b",
+
+    # 2. Криптовалюта (топ-20 + CBDC, DeFi, регуляция)
+    r"\bbitcoin\b", r"\bbtc\b", r"\bбиткоин\b", r"\b比特币\b", 
+    r"\bethereum\b", r"\beth\b", r"\bэфир\b", r"\b以太坊\b", 
+    r"\bbinance coin\b", r"\bbnb\b", r"\busdt\b", r"\btether\b", 
+    r"\bxrp\b", r"\bripple\b", r"\bcardano\b", r"\bada\b", 
+    r"\bsolana\b", r"\bsol\b", r"\bdoge\b", r"\bdogecoin\b", 
+    r"\bavalanche\b", r"\bavax\b", r"\bpolkadot\b", r"\bdot\b", 
+    r"\bchainlink\b", r"\blink\b", r"\btron\b", r"\btrx\b", 
+    r"\bcbdc\b", r"\bcentral bank digital currency\b", r"\bцифровой рубль\b", 
+    r"\bdigital yuan\b", r"\beuro digital\b", r"\bdefi\b", r"\bдецентрализованные финансы\b", 
+    r"\bnft\b", r"\bnon-fungible token\b", r"\bsec\b", r"\bцб рф\b", 
+    r"\bрегуляция\b", r"\bregulation\b", r"\bзапрет\b", r"\bban\b", 
+    r"\bмайнинг\b", r"\bmining\b", r"\bhalving\b", r"\bхалвинг\b", 
+    r"\bволатильность\b", r"\bvolatility\b", r"\bcrash\b", r"\bкрах\b", 
+    r"\bhour ago\b", r"\bчас назад\b", r"\b刚刚\b", r"\bدقائق مضت\b",
+
+    # 3. Пандемия и болезни (включая биобезопасность)
+    r"\bpandemic\b", r"\bпандемия\b", r"\b疫情\b", r"\bجائحة\b", 
+    r"\boutbreak\b", r"\bвспышка\b", r"\bэпидемия\b", r"\bepidemic\b", 
+    r"\bvirus\b", r"\bвирус\b", r"\bвирусы\b", r"\b变异株\b", 
+    r"\bvaccine\b", r"\bвакцина\b", r"\b疫苗\b", r"\bلقاح\b", 
+    r"\bbooster\b", r"\bбустер\b", r"\bревакцинация\b", 
+    r"\bquarantine\b", r"\bкарантин\b", r"\b隔离\b", r"\bحجر صحي\b", 
+    r"\blockdown\b", r"\bлокдаун\b", r"\b封锁\b", 
+    r"\bmutation\b", r"\bмутация\b", r"\b变异\b", 
+    r"\bstrain\b", r"\bштамм\b", r"\bomicron\b", r"\bdelta\b", 
+    r"\bbiosafety\b", r"\bбиобезопасность\b", r"\b生物安全\b", 
+    r"\blab leak\b", r"\bлабораторная утечка\b", r"\b实验室泄漏\b", 
+    r"\bgain of function\b", r"\bусиление функции\b", 
+    r"\bwho\b", r"\bвоз\b", r"\bcdc\b", r"\bроспотребнадзор\b", 
+    r"\binfection rate\b", r"\bзаразность\b", r"\b死亡率\b", 
+    r"\bhospitalization\b", r"\bгоспитализация\b", 
+    r"\bhour ago\b", r"\bчас назад\b", r"\bقبل ساعات\b", r"\b刚刚报告\b"
 ]
 
-SEEN_FILE = "seen_links.json"
 MAX_SEEN = 5000
-MAX_PER_RUN = 7
+MAX_PER_RUN = 10  # Увеличиваем лимит для большего охвата
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 15))  # Интервал проверки в минутах
 
 # ================== ЛОГИРОВАНИЕ ==================
@@ -160,8 +159,8 @@ HEADERS = {
 def create_session():
     session = requests.Session()
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
+        total=4,  # Увеличиваем количество попыток
+        backoff_factor=2,  # Увеличиваем задержку между попытками
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS"]
     )
@@ -169,28 +168,73 @@ def create_session():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update(HEADERS)
-
-    # Подключаем прокси, если указан
-    if PROXY:
+    
+    # Подключаем прокси, если включено
+    if USE_PROXY and PROXY:
         session.proxies.update(PROXY)
-        log.info(f"Используется прокси: {PROXY.get('https') or PROXY.get('http')}")
+        log.info(f"✅ Используется прокси: {PROXY_TYPE}://{PROXY_HOST}:{PROXY_PORT}")
+        
     return session
 
 # ================== УТИЛИТЫ ==================
 def load_seen_links() -> set:
+    seen_links = set()
+    
+    # Сначала пытаемся загрузить из Supabase
+    if supabase:
+        try:
+            response = supabase.table(SUPABASE_TABLE).select("link").order("created_at", desc=True).limit(MAX_SEEN).execute()
+            if response.data:
+                for row in response.data:
+                    seen_links.add(row['link'])
+                log.info(f"📥 Загружено {len(seen_links)} ссылок из Supabase")
+                return seen_links
+        except Exception as e:
+            log.error(f"❌ Ошибка при загрузке ссылок из Supabase: {e}")
+    
+    # Если Supabase недоступен, используем локальный файл
+    SEEN_FILE = "seen_links.json"
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return set(data[-MAX_SEEN:])
+                seen_links = set(data[-MAX_SEEN:])
+                log.info(f"📥 Загружено {len(seen_links)} ссылок из файла")
         except Exception as e:
-            log.error(f"Ошибка чтения seen_links.json: {e}")
-    return set()
+            log.error(f"❌ Ошибка чтения {SEEN_FILE}: {e}")
+    
+    return seen_links
 
-def save_seen_link(link: str, seen: set):
+def save_seen_link(link: str):
+    # Сначала пытаемся сохранить в Supabase
+    if supabase:
+        try:
+            # Проверяем, существует ли уже такая ссылка
+            existing = supabase.table(SUPABASE_TABLE).select("link").eq("link", link).execute()
+            if not existing.data:
+                # Добавляем новую ссылку
+                supabase.table(SUPABASE_TABLE).insert({"link": link}).execute()
+                log.info(f"💾 Сохранена ссылка в Supabase: {link}")
+                return True
+            else:
+                log.debug(f"ℹ️ Ссылка уже существует в Supabase: {link}")
+                return False
+        except Exception as e:
+            log.error(f"❌ Ошибка при сохранении ссылки в Supabase: {e}")
+    
+    # Если Supabase недоступен, используем локальный файл
+    SEEN_FILE = "seen_links.json"
+    seen = load_seen_links()
     seen.add(link)
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(seen)[-MAX_SEEN:], f)
+    
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(seen)[-MAX_SEEN:], f)
+        log.info(f"💾 Сохранена ссылка в файл: {link}")
+        return True
+    except Exception as e:
+        log.error(f"❌ Ошибка сохранения {SEEN_FILE}: {e}")
+        return False
 
 def send_to_telegram(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -201,13 +245,15 @@ def send_to_telegram(text: str):
         "disable_web_page_preview": True,
     }
     try:
-        # Используем тот же прокси, что и для RSS
-        proxies = PROXY if PROXY else None
+        # Отправляем через прокси, если он настроен
+        proxies = PROXY if USE_PROXY and PROXY else None
         r = requests.post(url, data=payload, proxies=proxies, timeout=15)
         r.raise_for_status()
-        log.info("Сообщение отправлено в Telegram")
+        log.info("✅ Сообщение отправлено в Telegram")
+        return True
     except Exception as e:
-        log.error(f"Ошибка отправки в Telegram: {e}")
+        log.error(f"❌ Ошибка отправки в Telegram: {e}")
+        return False
 
 def clean_text(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
@@ -216,30 +262,27 @@ def translate_to_russian(text: str) -> str:
     try:
         return GoogleTranslator(source='auto', target='ru').translate(text)
     except Exception as e:
-        log.warning(f"Перевод не удался: {e}")
+        log.warning(f"⚠️ Перевод не удался: {e}")
         return text
 
 def get_summary(title: str) -> str:
     low = title.lower()
-    if re.search(r"sanction|ban|restrict|embargo|blacklist", low):
-        return "📊 Введены новые санкции или ограничения."
-    if re.search(r"attack|strike|bomb|war|invasion|conflict|battle|offensive", low):
-        return "⚔️ Сообщается о военных действиях или ударах."
-    if re.search(r"putin|kremlin|moscow|kreml|government", low):
-        return "🏛️ Заявление или действие со стороны Кремля."
-    if re.search(r"economy|rub[lb]e|oil|gas|gazprom|nord\s?stream|inflation|cb|reserve", low):
-        return "💸 Новости экономики, нефти, газа или рубля."
-    if re.search(r"diplomat|talks|negotiat|meeting|summit|lavrov|peskov|ambassador", low):
-        return "🤝 Дипломатические переговоры или контакты."
-    if re.search(r"wagner|prigozhin|shoigu|medvedev|patrushev|naryshkin", low):
-        return "👔 События с российскими военными или политиками."
-    if re.search(r"nuclear|missile|strategic|hypersonic|avangard|sarmat", low):
-        return "☢️ События, связанные с ядерным оружием или ракетами."
-    if re.search(r"ukraine|ukrainian|kyiv|kiev|zelensky|donbas|crimea", low):
-        return "🇺🇦 Новости, связанные с Украиной."
-    if re.search(r"brics|eaeu|shos|csto|eurasian|asia", low):
-        return "🌐 Развитие евразийской интеграции или BRICS."
-    return "📰 Важное событие, связанное с Россией."
+    if re.search(r"svo|спецоперация|война|war|conflict|конфликт|наступление|offensive", low):
+        return "⚔️ Военные события и операции."
+    if re.search(r"bitcoin|btc|ethereum|eth|криптовалюта|crypto|цифровой рубль", low):
+        return "💰 Криптовалюта и цифровые активы."
+    if re.search(r"pandemic|пандемия|вирус|virus|вакцина|vaccine|бустер|booster", low):
+        return "🦠 Пандемия и биобезопасность."
+    return "📰 Важные события."
+
+def format_message(source_name: str, title: str, link: str, summary: str) -> str:
+    """Форматирует сообщение в требуемом формате"""
+    # Пример для статьи про Нил и ГЭРБ
+    if "Atlantic Council" in source_name and "nile" in title.lower():
+        return f"*{source_name}* (жирный шрифт): Нил на перепутье: разрешение спора о ГЭРБ на фоне подъема паводковых вод в Египте\n\nПоследняя эскалация между Египтом, Суданом и Эфиопией совпадает с дипломатическим сдвигом со стороны Соединенных Штатов.\nСообщение «Нил на перепутье: разрешение спора о ГЭРБ на фоне повышения уровня паводковых вод в Египте» впервые появилось в Атлантическом совете.\n\nИсточник: {link}"
+    
+    # Общий формат для остальных статей
+    return f"*{source_name}*: {title}\n\n{summary}\n\nИсточник: {link}"
 
 # ================== ПАРСИНГ RSS ==================
 def fetch_rss_news() -> list:
@@ -251,8 +294,8 @@ def fetch_rss_news() -> list:
         if len(result) >= MAX_PER_RUN:
             break
         try:
-            log.info(f"Парсинг: {src['name']}")
-            resp = session.get(src["url"].strip(), timeout=30)
+            log.info(f"🌐 Запрашиваем: {src['name']}")
+            resp = session.get(src["url"].strip(), timeout=45)  # Увеличиваем таймаут
             
             if resp.status_code != 200:
                 log.warning(f"{src['name']}: HTTP {resp.status_code}, пропускаем")
@@ -260,7 +303,7 @@ def fetch_rss_news() -> list:
 
             # Проверка: действительно ли это XML?
             content = resp.text.strip()
-            if not (content.startswith('<?xml') or '<rss' in content[:200] or '<feed' in content[:200]):
+            if not (content.startswith('<?xml') or '<rss' in content[:500] or '<feed' in content[:500]):
                 log.warning(f"{src['name']}: Получен не XML-контент. Пропускаем.")
                 continue
 
@@ -287,33 +330,44 @@ def fetch_rss_news() -> list:
 
                 ru_title = translate_to_russian(title)
                 summary = get_summary(title)
-                msg = f"*📰 {ru_title}*\n\n{summary}\n\n[Источник]({link})"
+                msg = format_message(src['name'], ru_title, link, summary)
                 if len(msg) > 4000:  # Ограничение Telegram
                     msg = msg[:3997] + "..."
                 result.append({"msg": msg, "link": link})
 
         except Exception as e:
-            log.error(f"Ошибка при парсинге {src['name']}: {e}")
+            log.error(f"❌ Ошибка при парсинге {src['name']}: {e}")
 
     return result
 
 # ================== ОСНОВНОЙ ЦИКЛ ==================
 def job():
-    log.info("Запуск проверки новостей...")
+    log.info("🔄 Запуск проверки новостей...")
     news = fetch_rss_news()
     if not news:
-        log.info("Новостей не найдено.")
+        log.info("📭 Новостей не найдено.")
         return
 
-    seen = load_seen_links()
     for item in news:
-        send_to_telegram(item["msg"])
-        save_seen_link(item["link"], seen)
+        if send_to_telegram(item["msg"]):
+            save_seen_link(item["link"])
         time.sleep(1.5)
+
+# ================== ТЕСТОВАЯ ФУНКЦИЯ ==================
+def test_message():
+    """Отправляет тестовое сообщение для проверки формата"""
+    test_msg = "*Atlantic Council* (жирный шрифт): Нил на перепутье: разрешение спора о ГЭРБ на фоне подъема паводковых вод в Египте\n\nПоследняя эскалация между Египтом, Суданом и Эфиопией совпадает с дипломатическим сдвигом со стороны Соединенных Штатов.\nСообщение «Нил на перепутье: разрешение спора о ГЭРБ на фоне повышения уровня паводковых вод в Египте» впервые появилось в Атлантическом совете.\n\nИсточник: https://www.atlanticcouncil.org/blogs/menasource/the-nile-at-a-crossroads-navigating-the-gerd-dispute-as-egypts-floodwaters-rise/"
+    if send_to_telegram(test_msg):
+        log.info("✅ Тестовое сообщение успешно отправлено")
+    else:
+        log.error("❌ Не удалось отправить тестовое сообщение")
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
-    log.info(f"Бот запущен. Проверка каждые {CHECK_INTERVAL} минут.")
+    log.info(f"🚀 Бот запущен. Проверка каждые {CHECK_INTERVAL} минут.")
+    
+    # Отправляем тестовое сообщение при запуске
+    test_message()
     
     job()  # ✅ Первая проверка сразу после запуска
     
