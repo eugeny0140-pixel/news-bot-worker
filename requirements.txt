@@ -1,8 +1,8 @@
-feedparser
 requests
 beautifulsoup4
+deep-translator
+schedule
 python-telegram-bot
 supabase
-httpx
-httpcore
-python-dateutil
+lxml
+python-dotenv
