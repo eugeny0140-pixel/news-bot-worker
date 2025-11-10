@@ -20,8 +20,7 @@ application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # Фильтры по категориям
 FILTERS = {
-    # --- Фильтры ---
-FILTERS = {
+
     "SVO": [
         r"\bsvo\b", r"\bспецоперация\b", r"\bspecial military operation\b",
         r"\bвойна\b", r"\bwar\b", r"\bconflict\b", r"\bконфликт\b",
