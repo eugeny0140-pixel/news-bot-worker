@@ -1,25 +1,26 @@
-import os
-import time
-import re
-import feedparser
 import requests
 from bs4 import BeautifulSoup
-from supabase import create_client
-from telegram import Bot
+import re
 from datetime import datetime
+import time
+import os
+from supabase import create_client
+from telegram.ext import Application
 from dateutil import parser as date_parser
 
-# --- Настройки ---
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHANNELS = ["@finanosint", "@time_n_John"]
+# Настройки (берутся из переменных окружения в продакшене)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "your-supabase-url")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-supabase-key")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "your-telegram-token")
+CHANNEL_IDS = ["@finanosint", "@time_n_John"]
 
-# --- Инициализация ---
+# Инициализация
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-bot = Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# --- Фильтры ---
+# Фильтры по категориям
+FILTERS = {
+    # --- Фильтры ---
 FILTERS = {
     "SVO": [
         r"\bsvo\b", r"\bспецоперация\b", r"\bspecial military operation\b",
@@ -73,210 +74,197 @@ FILTERS = {
     ]
 }
 
+# Компиляция регулярных выражений для производительности
 COMPILED_FILTERS = {
-    cat: [re.compile(p, re.IGNORECASE) for p in patterns]
+    cat: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
     for cat, patterns in FILTERS.items()
 }
 
-# --- Источники ---
-SOURCES = [
-    {"name": "The Economist", "rss": "https://www.economist.com/rss/latest/rss.xml"},
-    {"name": "Bloomberg", "rss": "https://feeds.bloomberg.com/markets/news.rss"},
-    {"name": "RAND Corporation", "rss": "https://www.rand.org/rss.xml"},
-    {"name": "CSIS", "rss": "https://www.csis.org/rss.xml"},
-    {"name": "Atlantic Council", "rss": "https://www.atlanticcouncil.org/feed/"},
-    {"name": "Chatham House", "rss": "https://www.chathamhouse.org/feed"},
-    {"name": "Foreign Affairs", "rss": "https://www.foreignaffairs.com/rss.xml"},
-    {"name": "CFR", "rss": "https://www.cfr.org/rss.xml"},
-    {"name": "BBC Future", "rss": "https://www.bbc.com/future/rss"},
-    {"name": "Future Timeline", "rss": "https://futuretimeline.net/blog.rss"},
-    {"name": "Carnegie Endowment", "rss": "https://carnegieendowment.org/feed"},
-    {"name": "Bruegel", "rss": "https://bruegel.org/feed/"},
-    {"name": "E3G", "rss": "https://e3g.org/feed/"},
-    {"name": "Good Judgment", "custom_parser": lambda: scrape_good_judgment()},
-    {"name": "Metaculus", "custom_parser": lambda: scrape_metaculus()},
-    {"name": "DNI Global Trends", "custom_parser": lambda: scrape_odni()},
-]
-
-# --- Парсеры ---
-def scrape_good_judgment():
-    url = "https://goodjudgment.com/blog"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
+def scrape_atlantic_council(url="https://www.atlanticcouncil.org/blogs/ukrainealert/"):
+    """Парсер для Atlantic Council, особенно раздела UkraineAlert"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'  # Явное указание кодировки
         soup = BeautifulSoup(response.text, 'html.parser')
-        posts = soup.find_all('article', class_='post') or soup.find_all('div', class_='blog-post')
-        for post in posts:
-            title_tag = post.find('h2') or post.find('h3')
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            link_tag = title_tag.find('a')
-            if not link_tag:
-                continue
-            link = link_tag.get('href')
-            if not link.startswith('http'):
-                link = "https://goodjudgment.com" + link
-            summary_tag = post.find('p')
-            summary = summary_tag.get_text(strip=True) if summary_tag else ""
-            pub_date = datetime.now().isoformat()
-
-            if article_exists(link):
-                continue
-            category = classify_article(title, summary)
-            if category:
-                save_article(title, link, summary, pub_date, "Good Judgment", category)
-                send_to_telegram(title, link, "Good Judgment", category)
-    except Exception as e:
-        print(f"❌ Ошибка парсинга Good Judgment: {e}")
-
-def scrape_metaculus():
-    url = "https://www.metaculus.com/questions/"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.find_all('div', class_='question-card') or soup.find_all('div', class_='question-list-item')
-        for item in items:
-            title_tag = item.find('a', class_='title-link') or item.find('h3').find('a')
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            link = "https://www.metaculus.com" + title_tag.get('href')
-            summary_tag = item.find('div', class_='blurb') or item.find('p')
-            summary = summary_tag.get_text(strip=True) if summary_tag else ""
-            pub_date = datetime.now().isoformat()
-
-            if article_exists(link):
-                continue
-            category = classify_article(title, summary)
-            if category:
-                save_article(title, link, summary, pub_date, "Metaculus", category)
-                send_to_telegram(title, link, "Metaculus", category)
-    except Exception as e:
-        print(f"❌ Ошибка парсинга Metaculus: {e}")
-
-def scrape_odni():
-    url = "https://www.dni.gov/index.php/gt2040-home"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        articles = soup.find_all('div', class_='article') or soup.find_all('div', class_='press-release')
-        for article in articles:
-            title_tag = article.find('h3') or article.find('h2')
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            link_tag = title_tag.find('a')
-            if link_tag:
-                link = link_tag.get('href')
+        
+        # Поиск всех статей в блоге UkraineAlert
+        articles = soup.find_all('article', class_=re.compile('post|article', re.I))
+        
+        results = []
+        for article in articles[:5]:  # Ограничиваем до 5 свежих статей
+            try:
+                # Извлечение заголовка
+                title_tag = article.find(['h2', 'h3', 'h1'], class_=re.compile('title|entry-title', re.I))
+                if not title_tag:
+                    continue
+                    
+                title = title_tag.get_text(strip=True)
+                
+                # Извлечение ссылки
+                link_tag = title_tag.find('a') if not hasattr(title_tag, 'href') else title_tag
+                if not link_tag:
+                    continue
+                    
+                link = link_tag['href'] if 'href' in link_tag.attrs else None
+                if not link:
+                    continue
+                    
                 if not link.startswith('http'):
-                    link = "https://www.dni.gov" + link
-            else:
-                link = url
-            summary_tag = article.find('p')
-            summary = summary_tag.get_text(strip=True) if summary_tag else ""
-            pub_date = datetime.now().isoformat()
-
-            if article_exists(link):
+                    link = f"https://www.atlanticcouncil.org{link}"
+                
+                # Извлечение краткого описания
+                summary_tag = article.find('p', class_=re.compile('excerpt|summary|description', re.I))
+                summary = summary_tag.get_text(strip=True) if summary_tag else ""
+                
+                # Если нет краткого описания, возьмем первый абзац из контента
+                if not summary:
+                    content_div = article.find('div', class_=re.compile('content|entry-content', re.I))
+                    if content_div:
+                        first_p = content_div.find('p')
+                        summary = first_p.get_text(strip=True) if first_p else ""
+                
+                # Извлечение даты публикации
+                date_tag = article.find('time') or article.find(class_=re.compile('date|time', re.I))
+                pub_date = None
+                if date_tag:
+                    date_str = date_tag.get('datetime', '') or date_tag.get_text(strip=True)
+                    try:
+                        pub_date = date_parser.parse(date_str).isoformat()
+                    except:
+                        pub_date = datetime.now().isoformat()
+                else:
+                    pub_date = datetime.now().isoformat()
+                
+                results.append({
+                    "title": title,
+                    "url": link,
+                    "summary": summary[:300] + "..." if len(summary) > 300 else summary,  # Ограничиваем длину
+                    "pub_date": pub_date,
+                    "source": "Atlantic Council"
+                })
+            except Exception as e:
+                print(f"Ошибка при обработке статьи Atlantic Council: {e}")
                 continue
-            category = classify_article(title, summary)
-            if category:
-                save_article(title, link, summary, pub_date, "DNI Global Trends", category)
-                send_to_telegram(title, link, "DNI Global Trends", category)
+                
+        return results
     except Exception as e:
-        print(f"❌ Ошибка парсинга DNI: {e}")
+        print(f"Критическая ошибка при парсинге Atlantic Council: {e}")
+        return []
 
-# --- Функции ---
-def contains_keywords(text, category):
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in COMPILED_FILTERS[category])
-
-def classify_article(title, summary):
-    text = f"{title} {summary}".lower()
-    for category in ["SVO", "Crypto", "Pandemic"]:
-        if contains_keywords(text, category):
-            return category
-    return None
-
-def is_recent(entry, max_hours=2):
-    try:
-        pub = date_parser.parse(entry.published)
-        now = datetime.now(pub.tzinfo)
-        diff_hours = (now - pub).total_seconds() / 3600
-        return diff_hours < max_hours
-    except:
-        return True
-
-def article_exists(url):
-    response = supabase.table("news_articles").select("id").eq("url", url).execute()
-    return len(response.data) > 0
-
-def save_article(title, url, description, pub_date, source, category):
-    supabase.table("news_articles").insert({
-        "title": title,
-        "url": url,
-        "description": description or "",
-        "pub_date": pub_date,
-        "source_name": source,
-        "category": category
-    }).execute()
-
-def send_to_telegram(title, url, source, category):
+async def async_send_to_telegram(title, url, source, category, summary=None):
+    """Асинхронная отправка сообщения в Telegram"""
+    # Форматируем сообщение в требуемом формате
     message = (
-        f"[{category}] {title}\n"
-        f"Источник: <a href='{url}'>{source}</a>"
+        f"<b>{source.upper()}</b>: {title}\n\n"
     )
-    for channel in CHANNELS:
+    
+    if summary:
+        message += f"{summary}\n\n"
+    
+    message += f"Источник: <a href='{url}'>{source}</a>"
+    
+    for channel in CHANNEL_IDS:
         try:
-            bot.send_message(chat_id=channel, text=message, parse_mode="HTML", disable_web_page_preview=False)
-            print(f"✅ Отправлено в {channel}: {title}")
+            await application.bot.send_message(
+                chat_id=channel,
+                text=message,
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
+            print(f"✅ Отправлено в {channel}: {title[:50]}...")
         except Exception as e:
             print(f"❌ Ошибка отправки в {channel}: {e}")
 
-# --- Основной цикл ---
-def fetch_from_rss(source):
+def send_to_telegram(title, url, source, category, summary=None):
+    """Синхронная обертка для отправки сообщения"""
+    import asyncio
+    asyncio.run(async_send_to_telegram(title, url, source, category, summary))
+
+def classify_article(title, summary):
+    """Классификация статьи по категориям"""
+    text = f"{title} {summary}".lower()
+    
+    for category, patterns in COMPILED_FILTERS.items():
+        if any(pattern.search(text) for pattern in patterns):
+            return category
+    return None
+
+def article_exists(url):
+    """Проверка существования статьи в базе"""
     try:
-        feed = feedparser.parse(source["rss"])
-        if feed.bozo:
-            print(f"⚠️ Ошибка парсинга RSS {source['name']}: {feed.bozo_exception}")
-            return
-        for entry in feed.entries:
-            url = entry.link
-            title = entry.title.strip()
-            summary = entry.get("summary", "") or entry.get("description", "")
-            pub_date = entry.get("published", datetime.now().isoformat())
-
-            if not url or not title:
-                continue
-
-            if not is_recent(entry, max_hours=2):
-                continue
-
-            if article_exists(url):
-                continue
-
-            category = classify_article(title, summary)
-            if category:
-                save_article(title, url, summary, pub_date, source["name"], category)
-                send_to_telegram(title, url, source["name"], category)
-
+        response = supabase.table("news_articles").select("id").eq("url", url).execute()
+        return len(response.data) > 0
     except Exception as e:
-        print(f"❌ Ошибка обработки {source['name']}: {e}")
+        print(f"Ошибка проверки существования статьи: {e}")
+        return False
 
-def fetch_and_process():
-    for source in SOURCES:
-        if "custom_parser" in source:
-            source["custom_parser"]()
+def save_article(title, url, description, pub_date, source, category):
+    """Сохранение статьи в базу данных"""
+    try:
+        supabase.table("news_articles").insert({
+            "title": title,
+            "url": url,
+            "description": description or "",
+            "pub_date": pub_date,
+            "source_name": source,
+            "category": category
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"Ошибка сохранения статьи: {e}")
+        return False
+
+def process_atlantic_council_articles():
+    """Обработка статей с Atlantic Council"""
+    print("🔍 Парсинг статей Atlantic Council...")
+    articles = scrape_atlantic_council()
+    
+    if not articles:
+        print("❌ Не удалось получить статьи Atlantic Council")
+        return
+    
+    for article in articles:
+        # Проверяем, не существует ли уже такая статья
+        if article_exists(article['url']):
+            print(f"⏩ Статья уже существует: {article['title'][:50]}...")
+            continue
+        
+        # Классифицируем статью
+        category = classify_article(article['title'], article['summary'])
+        
+        if category:
+            print(f"✅ Найдена релевантная статья [{category}]: {article['title']}")
+            
+            # Сохраняем в базу
+            if save_article(
+                article['title'],
+                article['url'],
+                article['summary'],
+                article['pub_date'],
+                article['source'],
+                category
+            ):
+                # Отправляем в Telegram
+                send_to_telegram(
+                    article['title'],
+                    article['url'],
+                    article['source'],
+                    category,
+                    article['summary']
+                )
         else:
-            fetch_from_rss(source)
+            print(f"⏭️ Статья не прошла фильтрацию: {article['title'][:50]}...")
+
+def main():
+    """Основная функция"""
+    print("🚀 Запуск обработки новостей Atlantic Council...")
+    process_atlantic_council_articles()
+    print("✅ Обработка завершена")
 
 if __name__ == "__main__":
-    print("🚀 Background Worker запущен. Ожидание 14 минут между проверками...")
-    while True:
-        print(f"\n🕒 Проверка источников: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        fetch_and_process()
-        print(f"⏳ Следующая проверка через 14 минут...")
-        time.sleep(14 * 60)
+    main()
+
+
